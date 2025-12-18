@@ -1,0 +1,192 @@
+---
+title: "Fetch raw data"
+output: github_document
+author: "Mruthyunjay Kubendran Sumathi"
+date: "`r Sys.Date()`"
+last_modified: "`r format(Sys.time(), '%Y-%m-%d %H:%M')`"
+---
+
+
+```{r }
+knitr::opts_chunk$set(echo = TRUE,message = FALSE,warning = FALSE)
+```
+## Executive Summary
+
+This pipeline creates the **world's largest archaeal phylogeny** (371 genomes) + massive bacterial comparative dataset (5491 genomes) for temperature adaptation analysis.
+
+**Key outputs:**
+- `tempura_gtdb_all_FULL.csv` (5862 genomes × 132 traits)
+- Pruned metada for archaea and Bacteria: `tempura_gtdb_archaea_PRUNED.csv` and `tempura_gtdb_bacterea_PRUNED.csv`
+- Pruned GTDB trees: `ar53_r226_TEMPURA_pruned.tree` and `bac120_r226_TEMPURA_pruned.tree`
+- **83% Archaea + 91% Bacteria coverage** in realtion to entries in Tempura database
+
+**Data sources:**
+- **TEMPURA** (Sato et al. 2020): 14,000+ growth temperature experiments
+- **GTDB r226**: 300k+ high-quality genomes + reference trees
+
+
+## 1. Load Libraries & Setup
+Loading core packages for **data cleaning** (`tidyverse`), **phylogenetic trees** (`ape`), **NCBI access** (`rentrez`), and **reproducible paths** (`here`). Custom functions handle TEMPURA→GTDB mapping and tree pruning.
+```{r Loading libraries, directory and helper functions}
+#Core data manipulation and I/O
+library(tidyverse)
+library(tidyr)
+#NCBI and phylogeny tools
+library(rentrez)
+library(ape)
+library(taxize)
+#Miscellaneous helpers
+library(jsonlite)
+library(here)
+select <- dplyr::select
+#Load helper functions
+source(here("analysis", "functions", "tempura_helpers.R"))
+source(here("analysis", "functions", "metadata_integration.R"))
+source(here("analysis", "functions", "tree_helpers.R"))
+
+cat("Project root detected at:", here(), "\n")
+```
+## 2. TEMPURA → GTDB Mapping  
+Here we load **TEMPURA** (Sato et al., 2020) growth-temperature database and map each archaeal/bacterial species to a single **GTDB r226** genome.
+
+**Why GTDB mapping?** TEMPURA has growth temperatures but no genomes. GTDB provides:
+- High-quality assemblies (≥90% complete, ≤5% contaminated) 
+- Reference phylogenetic trees (ar53/bac120)
+- Standardized taxonomy across 300k+ prokaryotes
+
+**Mapping strategy:** NCBI TaxID (primary) → genus_species name (backup) → pick GTDB representative
+```{r Loading Tempura and GTDB metadata}
+tempura_path <- here::here("data", "raw", "Tempura_data.csv")
+tempura_all <- load_tempura_complete(tempura_path)
+
+cat("[TEMPURA] rows:", nrow(tempura_all), " NAs in Topt_ave:", sum(is.na(tempura_all$Topt_ave)), "\n")
+
+#Read GTDB metadata for Archaea and Bacteria (release r226)
+ar_meta <- readr::read_tsv(here("data", "raw", "ar53_metadata_r226.tsv"))
+bac_meta <- readr::read_tsv(here("data", "raw", "bac120_metadata_r226.tsv"))
+
+cat("[ar_meta] rows:", nrow(ar_meta)," NAs in gtdb_representative:", sum(is.na(ar_meta$gtdb_representative)), "\n")
+cat("[ar_meta] rows:", nrow(bac_meta)," NAs in gtdb_representative:", sum(is.na(bac_meta$gtdb_representative)), "\n")
+```
+```{r Maping tempura Taxid and species to GTDB metadata}
+#Map TEMPURA → GTDB genomes (TaxID primary, binomial secondary)
+map_res <- map_all_tempura_to_gtdb_r226(
+tempura_tbl = tempura_all,
+ar_meta_tbl = ar_meta,
+bac_meta_tbl = bac_meta
+)
+write_csv(map_res$archaea$mapped, here::here("data", "processed", "gtdb_tempura_ar_ALL_MATCH.csv"))
+write_csv(map_res$bacteria$mapped, here::here("data", "processed", "gtdb_tempura_bac_ALL_MATCH.csv"))
+```
+
+## 3. Quality Control & Best Genome Selection
+
+**For each TEMPURA species → pick BEST GTDB genome** using:  
+**Priority 1:** GTDB representative (1/genus)  
+**Priority 2:** Highest CheckM quality (completeness - 5×contamination)  
+
+**Result:** 449 Archaea + 6056 Bacteria → single best genome per species.
+```{r selecting best genome and QC on matches}
+#Select one best genome per TEMPURA row (prefer GTDB representative)
+archaea_best <- pick_best_gtdb_genome(map_res$archaea$mapped)
+bacteria_best <- pick_best_gtdb_genome(map_res$bacteria$mapped)
+
+cat("Archaea:", nrow(archaea_best), "unique row_ids =", n_distinct(archaea_best$row_id), "\n")
+cat("Bacteria:", nrow(bacteria_best), "unique row_ids =", n_distinct(bacteria_best$row_id), "\n")
+cat("Reps - Archaea:", sum(archaea_best$gtdb_representative), "/", nrow(archaea_best), "\n")
+```
+## 4. Save Master Datasets
+**Three output files:** FULL (132 columns, all metadata), PRUNED (30 key traits for PGLS), and domain-specific CSVs. Total: **5862 genomes ready for analysis**.
+```{r saving the FULL data files}
+#Save FULL metadata with ALL TEMPURA + GTDB columns (no pruning)
+archaea_full <- archaea_best
+bacteria_full <- bacteria_best
+
+#Combined master file (ALL columns)
+tempura_gtdb_all_full <- bind_rows(
+archaea_full %>% mutate(superkingdom = "Archaea"),
+bacteria_full %>% mutate(superkingdom = "Bacteria")
+)
+
+#Save everything
+readr::write_csv(archaea_full, here::here("data", "processed", "tempura_gtdb_archaea_FULL.csv"))
+readr::write_csv(bacteria_full, here::here("data", "processed", "tempura_gtdb_bacteria_FULL.csv"))
+readr::write_csv(tempura_gtdb_all_full, here::here("data", "processed", "tempura_gtdb_all_FULL.csv"))
+
+cat("tempura_gtdb_archaea_FULL.csv (", nrow(archaea_full), " archaea, ", ncol(archaea_full), " cols)\n", sep="")
+cat("tempura_gtdb_bacteria_FULL.csv (", nrow(bacteria_full), " bacteria, ", ncol(bacteria_full), " cols)\n", sep="")
+cat("tempura_gtdb_all_FULL.csv (", nrow(tempura_gtdb_all_full), " total, ", ncol(tempura_gtdb_all_full), " cols)\n", sep="")
+```
+```{r Pruning only usable columns for comparative analysis}
+key_cols <- c("genus_and_species","superkingdom","phylum","class",
+    "order","family","genus","Tmin","Topt_ave","Tmax","gc_count",
+    "gc_percentage","genome_size","accession","coding_bases","coding_density",
+    "ncbi_biosample","ncbi_country","ncbi_isolation_source","ncbi_lat_lon",
+    "gtdb_representative","ncbi_ncrna_count","ncbi_organism_name","ncbi_protein_count",
+    "ncbi_rrna_count","ncbi_trna_count","protein_count","trna_aa_count","trna_count",
+    "checkm2_completeness","checkm2_contamination"
+)
+
+# Keep only columns that actually exist (robust to minor name issues)
+key_cols_archaea  <- key_cols[key_cols %in% names(archaea_full)]
+key_cols_bacteria <- key_cols[key_cols %in% names(bacteria_full)]
+
+archaea_key  <- archaea_full  %>% dplyr::select(all_of(key_cols_archaea))
+bacteria_key <- bacteria_full %>% dplyr::select(all_of(key_cols_bacteria))
+
+#save
+readr::write_csv(archaea_key,  here::here("data", "processed", "tempura_gtdb_archaea_PRUNED.csv"))
+readr::write_csv(bacteria_key, here::here("data", "processed", "tempura_gtdb_bacteria_PRUNED.csv"))
+```
+## 5. Tree Pruning & Validation
+**Prune GTDB reference trees** to match our 5862 genomes: ar53→371 Archaea tips, bac120→5491 Bacteria tips.
+```{r Loading the tree and pruning it}
+#Load GTDB trees
+ar_tree <- ape::read.tree(here("data", "raw", "ar53_r226.tree"))
+bac_tree <- ape::read.tree(here("data", "raw", "bac120_r226.tree"))
+
+#Archaea Tree
+ar_mapping <- check_tree_mapping(archaea_key, ar_tree)
+ar_tree_pruned <- prune_tree_to_tempura(archaea_key, ar_tree)
+#Bacteria Tree
+bac_mapping <- check_tree_mapping(bacteria_key, bac_tree)
+bac_tree_pruned <- prune_tree_to_tempura(bacteria_key, bac_tree)
+
+#Save pruned trees
+ape::write.tree(ar_tree_pruned, here::here("data", "processed", "ar53_r226_TEMPURA_pruned.tree"))
+ape::write.tree(bac_tree_pruned, here::here("data", "processed", "bac120_r226_TEMPURA_pruned.tree"))
+
+cat("\nSaved pruned trees to data/processed/:\n")
+cat(" - ar53_r226_TEMPURA_pruned.tree (Archaea)\n")
+cat(" - bac120_r226_TEMPURA_pruned.tree (Bacteria)\n")
+```
+## 6. Final Coverage Report
+**Validation:** Double-check tree coverage + explore "missing" species via GTDB alternatives.
+```{r double checking unmatched species}
+ar_report <- report_tree_coverage(
+  here::here("data", "processed", "gtdb_tempura_ar_ALL_MATCH.csv"), 
+  archaea_key, ar_tree, "Archaea ar53"
+)
+bac_report <- report_tree_coverage(
+  here::here("data", "processed", "gtdb_tempura_bac_ALL_MATCH.csv"), 
+  bacteria_key, bac_tree, "Bacteria bac120"
+)
+```
+## Results Interpretation
+
+GTDB r226 reference trees pruned to high-quality genomes:
+• Archaea ar53: 371/449 TEMPURA genomes (**83%**)  
+• Bacteria bac120: 5491/6056 TEMPURA genomes (**91%**)
+Total: 5862 phylogenetically-informed genomes for comparative analysis"
+
+**Next:** Comparative analysis, PGLS regression and Phylogenetic path analysis (`Topt ~ genome_size + phylogeny`) on 5862 taxa!
+
+## References
+
+- **TEMPURA**: Sato et al. (2020) *Nature Microbiology* "Global database of prokaryotic growth temperatures"
+- **GTDB r226**: Parks et al. (2023) *Nature Biotechnology* "GTDB provides reference bacterial/archaeal taxonomy"
+- **Trees**: GTDB-Tk v2.4.0 (ar53/bac120 markers, IQ-TREE)
+
+**Reproducibility:** 
+- `renv.lock` + GitHub repo = exact replication possible!
+- For any querries contact **mruthyunjay@arizona.edu** or refer to current affiliation

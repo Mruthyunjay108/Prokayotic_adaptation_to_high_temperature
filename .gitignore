@@ -1,0 +1,6 @@
+data/raw/
+data/processed/*.csv
+.Rhistory
+.RData
+.Rproj.user/
+docs/
